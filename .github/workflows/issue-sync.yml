@@ -193,22 +193,37 @@ jobs:
             
             // Main logic to handle different event types
             async function main() {
-              if (context.payload.issue) {
-                // Find or create linked private issue
-                let privateIssueNumber = await findLinkedPrivateIssue(context.payload.issue.number);
+              try {
+                console.log('Event type:', context.eventName);
+                console.log('Action:', context.payload.action);
                 
-                if (!privateIssueNumber && context.payload.action === 'opened') {
-                  // Create new issue in private repo
-                  privateIssueNumber = await handleNewIssue();
-                } else if (privateIssueNumber) {
-                  // Update existing private issue
-                  await updatePrivateIssue(privateIssueNumber);
+                if (context.payload.issue) {
+                  console.log('Processing issue #', context.payload.issue.number);
+                  
+                  // Find or create linked private issue
+                  let privateIssueNumber = await findLinkedPrivateIssue(context.payload.issue.number);
+                  console.log('Linked private issue:', privateIssueNumber);
+                  
+                  if (!privateIssueNumber && context.payload.action === 'opened') {
+                    // Create new issue in private repo
+                    console.log('Creating new issue in private repo');
+                    privateIssueNumber = await handleNewIssue();
+                    console.log('Created private issue #', privateIssueNumber);
+                  } else if (privateIssueNumber) {
+                    // Update existing private issue
+                    console.log('Updating existing private issue #', privateIssueNumber);
+                    await updatePrivateIssue(privateIssueNumber);
+                  }
                 }
-              }
-              
-              // Handle comments
-              if (context.payload.comment && context.payload.action === 'created') {
-                await syncNewComment();
+                
+                // Handle comments
+                if (context.payload.comment && context.payload.action === 'created') {
+                  console.log('Syncing new comment from user:', context.payload.comment.user.login);
+                  await syncNewComment();
+                }
+              } catch (error) {
+                console.error('Error in main function:', error);
+                // Continue execution despite errors to avoid failing the whole workflow
               }
             }
             
@@ -216,7 +231,7 @@ jobs:
             await main();
       
       - name: Sync Status from Private to Public
-        if: github.repository == 'aragonddev/aragond-mud' && (github.event.action == 'closed' || github.event.action == 'reopened' || github.event.action == 'labeled')
+        if: github.repository == 'aragonddev/aragond' && (github.event.action == 'closed' || github.event.action == 'reopened' || github.event.action == 'labeled')
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.PAT_TOKEN }}
@@ -227,25 +242,50 @@ jobs:
             
             // Extract the public issue number from the private issue title or body
             function extractPublicIssueNumber(title, body) {
+              // Add null/undefined checks
+              if (!title && !body) {
+                console.log('Both title and body are empty or null');
+                return null;
+              }
+              
               // Try to extract from title format: [Public #123]
-              const titleMatch = title.match(/\[Public #(\d+)\]/);
-              if (titleMatch) return titleMatch[1];
+              if (title) {
+                const titleMatch = title.match(/\[Public #(\d+)\]/);
+                if (titleMatch) return titleMatch[1];
+              }
               
               // Try to extract from body
-              const bodyMatch = body.match(/Public issue: #(\d+)/);
-              if (bodyMatch) return bodyMatch[1];
+              if (body) {
+                const bodyMatch = body.match(/Public issue: #(\d+)/);
+                if (bodyMatch) return bodyMatch[1];
+              }
+              
+              console.log('Could not find issue reference in either title or body');
+              console.log('Title:', title);
+              console.log('Body excerpt:', body ? body.substring(0, 100) + '...' : 'null or empty');
               
               return null;
             }
             
             async function syncStatusBackToPublic() {
-              const issue = context.payload.issue;
-              const publicIssueNumber = extractPublicIssueNumber(issue.title, issue.body);
-              
-              if (!publicIssueNumber) {
-                console.log('Could not find linked public issue number');
-                return;
-              }
+              try {
+                const issue = context.payload.issue;
+                
+                if (!issue) {
+                  console.log('No issue found in payload');
+                  return;
+                }
+                
+                console.log('Processing issue:', issue.number);
+                console.log('Issue title:', issue.title);
+                console.log('Issue body excerpt:', issue.body ? issue.body.substring(0, 100) + '...' : 'null or empty');
+                
+                const publicIssueNumber = extractPublicIssueNumber(issue.title, issue.body);
+                
+                if (!publicIssueNumber) {
+                  console.log('Could not find linked public issue number');
+                  return;
+                }
               
               // Sync closed/reopened status
               if (context.payload.action === 'closed' || context.payload.action === 'reopened') {
@@ -273,6 +313,9 @@ jobs:
                   issue_number: publicIssueNumber,
                   labels: [context.payload.label.name]
                 });
+              }
+            } catch (error) {
+                console.error('Error in syncStatusBackToPublic:', error);
               }
             }
             
