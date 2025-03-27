@@ -1,2 +1,5 @@
 # aragond-mud
-Public Github interface for the Aragond Mud
+Visit our home page [here](https://aragond.net).
+<br>
+<br>
+Join our discord [here](https://discord.com/invite/c7PcyKmVur).

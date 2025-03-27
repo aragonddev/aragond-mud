@@ -1,0 +1,279 @@
+name: Sync Issues Between Repositories
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created, edited, deleted]
+
+jobs:
+  sync-issues:
+    runs-on: ubuntu-latest
+    # Only run this action when the event occurs in the public repository
+    if: github.repository == 'aragonddev/aragond-mud'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+      
+      - name: Install dependencies
+        run: npm install @octokit/rest
+      
+      - name: Sync Issue to Private Repository
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const privateOwner = 'aragonddev';
+            const privateRepo = 'aragond';
+            
+            // Function to extract issue details
+            async function getIssueDetails() {
+              const issueNumber = context.payload.issue.number;
+              const issue = context.payload.issue;
+              
+              // Get all comments
+              const { data: comments } = await github.rest.issues.listComments({
+                owner,
+                repo,
+                issue_number: issueNumber,
+              });
+              
+              return { issue, comments };
+            }
+            
+            // Function to find the linked private issue
+            async function findLinkedPrivateIssue(publicIssueNumber) {
+              try {
+                // Search for issues in private repo that mention the public issue
+                const query = `repo:${privateOwner}/${privateRepo} Public issue: #${publicIssueNumber} in:body`;
+                const { data } = await github.rest.search.issuesAndPullRequests({ q: query });
+                
+                if (data.items.length > 0) {
+                  return data.items[0].number;
+                }
+                return null;
+              } catch (error) {
+                console.error('Error finding linked issue:', error);
+                return null;
+              }
+            }
+            
+            // Handle new issue creation
+            async function handleNewIssue() {
+              const { issue, comments } = await getIssueDetails();
+              
+              // Check if this issue already has a linked private issue
+              const linkedIssueNumber = await findLinkedPrivateIssue(issue.number);
+              if (linkedIssueNumber) {
+                console.log(`Issue already linked to private issue #${linkedIssueNumber}`);
+                return linkedIssueNumber;
+              }
+              
+              // Create a new issue in the private repository
+              const body = `
+              ## Synced from public issue #${issue.number}
+              
+              [Link to public issue](https://github.com/${owner}/${repo}/issues/${issue.number})
+              
+              Public issue: #${issue.number}
+              
+              ---
+              
+              ${issue.body || ''}
+              `;
+              
+              const { data: newIssue } = await github.rest.issues.create({
+                owner: privateOwner,
+                repo: privateRepo,
+                title: `[Public #${issue.number}] ${issue.title}`,
+                body: body,
+                labels: issue.labels.map(label => label.name)
+              });
+              
+              // Add a comment to the public issue linking to the private issue
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issue.number,
+                body: `This issue has been synced to the private repository for tracking.`
+              });
+              
+              return newIssue.number;
+            }
+            
+            // Update an existing private issue
+            async function updatePrivateIssue(privateIssueNumber) {
+              const { issue } = await getIssueDetails();
+              
+              // Update title and body if the issue was edited
+              if (context.payload.action === 'edited') {
+                await github.rest.issues.update({
+                  owner: privateOwner,
+                  repo: privateRepo,
+                  issue_number: privateIssueNumber,
+                  title: `[Public #${issue.number}] ${issue.title}`,
+                  body: `
+                  ## Synced from public issue #${issue.number}
+                  
+                  [Link to public issue](https://github.com/${owner}/${repo}/issues/${issue.number})
+                  
+                  Public issue: #${issue.number}
+                  
+                  ---
+                  
+                  ${issue.body || ''}
+                  `
+                });
+              }
+              
+              // Sync closed/reopened status
+              if (context.payload.action === 'closed' || context.payload.action === 'reopened') {
+                await github.rest.issues.update({
+                  owner: privateOwner,
+                  repo: privateRepo,
+                  issue_number: privateIssueNumber,
+                  state: issue.state
+                });
+              }
+              
+              // Sync labels
+              if (context.payload.action === 'labeled' || context.payload.action === 'unlabeled') {
+                // Get all current labels on the private issue
+                const { data: privateLabels } = await github.rest.issues.listLabelsOnIssue({
+                  owner: privateOwner,
+                  repo: privateRepo,
+                  issue_number: privateIssueNumber
+                });
+                
+                // Remove all labels
+                if (privateLabels.length > 0) {
+                  await github.rest.issues.removeAllLabels({
+                    owner: privateOwner,
+                    repo: privateRepo,
+                    issue_number: privateIssueNumber
+                  });
+                }
+                
+                // Add all labels from public issue
+                if (issue.labels.length > 0) {
+                  await github.rest.issues.addLabels({
+                    owner: privateOwner,
+                    repo: privateRepo,
+                    issue_number: privateIssueNumber,
+                    labels: issue.labels.map(label => label.name)
+                  });
+                }
+              }
+            }
+            
+            // Handle new comments
+            async function syncNewComment() {
+              if (!context.payload.comment) return;
+              
+              const issueNumber = context.payload.issue.number;
+              const privateIssueNumber = await findLinkedPrivateIssue(issueNumber);
+              
+              if (privateIssueNumber) {
+                const comment = context.payload.comment;
+                await github.rest.issues.createComment({
+                  owner: privateOwner,
+                  repo: privateRepo,
+                  issue_number: privateIssueNumber,
+                  body: `**Comment from public issue by @${comment.user.login}:**\n\n${comment.body}`
+                });
+              }
+            }
+            
+            // Main logic to handle different event types
+            async function main() {
+              if (context.payload.issue) {
+                // Find or create linked private issue
+                let privateIssueNumber = await findLinkedPrivateIssue(context.payload.issue.number);
+                
+                if (!privateIssueNumber && context.payload.action === 'opened') {
+                  // Create new issue in private repo
+                  privateIssueNumber = await handleNewIssue();
+                } else if (privateIssueNumber) {
+                  // Update existing private issue
+                  await updatePrivateIssue(privateIssueNumber);
+                }
+              }
+              
+              // Handle comments
+              if (context.payload.comment && context.payload.action === 'created') {
+                await syncNewComment();
+              }
+            }
+            
+            // Execute main function
+            await main();
+      
+      - name: Sync Status from Private to Public
+        if: github.repository == 'aragonddev/aragond-mud' && (github.event.action == 'closed' || github.event.action == 'reopened' || github.event.action == 'labeled')
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const publicOwner = 'aragonddev';
+            const publicRepo = 'aragond-mud';
+            
+            // Extract the public issue number from the private issue title or body
+            function extractPublicIssueNumber(title, body) {
+              // Try to extract from title format: [Public #123]
+              const titleMatch = title.match(/\[Public #(\d+)\]/);
+              if (titleMatch) return titleMatch[1];
+              
+              // Try to extract from body
+              const bodyMatch = body.match(/Public issue: #(\d+)/);
+              if (bodyMatch) return bodyMatch[1];
+              
+              return null;
+            }
+            
+            async function syncStatusBackToPublic() {
+              const issue = context.payload.issue;
+              const publicIssueNumber = extractPublicIssueNumber(issue.title, issue.body);
+              
+              if (!publicIssueNumber) {
+                console.log('Could not find linked public issue number');
+                return;
+              }
+              
+              // Sync closed/reopened status
+              if (context.payload.action === 'closed' || context.payload.action === 'reopened') {
+                await github.rest.issues.update({
+                  owner: publicOwner,
+                  repo: publicRepo,
+                  issue_number: publicIssueNumber,
+                  state: issue.state
+                });
+                
+                // Add a comment about the status change
+                await github.rest.issues.createComment({
+                  owner: publicOwner,
+                  repo: publicRepo,
+                  issue_number: publicIssueNumber,
+                  body: `Issue was ${issue.state} by the development team.`
+                });
+              }
+              
+              // Sync specific labels back if needed (you can customize which labels to sync back)
+              if (context.payload.action === 'labeled' && context.payload.label.name.startsWith('status:')) {
+                await github.rest.issues.addLabels({
+                  owner: publicOwner,
+                  repo: publicRepo,
+                  issue_number: publicIssueNumber,
+                  labels: [context.payload.label.name]
+                });
+              }
+            }
+            
+            await syncStatusBackToPublic();
