@@ -1,0 +1,169 @@
+name: Sync Issue Status from Private to Public
+
+on:
+  issues:
+    types: [closed, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created, edited, deleted]
+
+jobs:
+  sync-to-public:
+    runs-on: ubuntu-latest
+    # Only run this action when the event occurs in the private repository
+    if: github.repository == 'aragonddev/aragond'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+      
+      - name: Install dependencies
+        run: npm install @octokit/rest
+      
+      - name: Sync Status from Private to Public
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const publicOwner = 'aragonddev';
+            const publicRepo = 'aragond-mud';
+            
+            // Extract the public issue number from the private issue title or body
+            function extractPublicIssueNumber(title, body) {
+              // Add null/undefined checks
+              if (!title && !body) {
+                console.log('Both title and body are empty or null');
+                return null;
+              }
+              
+              // Try to extract from title format: [Public #123]
+              if (title) {
+                const titleMatch = title.match(/\[Public #(\d+)\]/);
+                if (titleMatch) return titleMatch[1];
+              }
+              
+              // Try to extract from body
+              if (body) {
+                const bodyMatch = body.match(/Public issue: #(\d+)/);
+                if (bodyMatch) return bodyMatch[1];
+              }
+              
+              console.log('Could not find issue reference in either title or body');
+              console.log('Title:', title);
+              console.log('Body excerpt:', body ? body.substring(0, 100) + '...' : 'null or empty');
+              
+              return null;
+            }
+            
+            async function syncStatusBackToPublic() {
+              try {
+                const issue = context.payload.issue;
+                
+                if (!issue) {
+                  console.log('No issue found in payload');
+                  return;
+                }
+                
+                console.log('Processing issue:', issue.number);
+                console.log('Issue title:', issue.title);
+                console.log('Issue body excerpt:', issue.body ? issue.body.substring(0, 100) + '...' : 'null or empty');
+                
+                const publicIssueNumber = extractPublicIssueNumber(issue.title, issue.body);
+                
+                if (!publicIssueNumber) {
+                  console.log('Could not find linked public issue number');
+                  return;
+                }
+                
+                // Sync closed/reopened status
+                if (context.payload.action === 'closed' || context.payload.action === 'reopened') {
+                  await github.rest.issues.update({
+                    owner: publicOwner,
+                    repo: publicRepo,
+                    issue_number: publicIssueNumber,
+                    state: issue.state
+                  });
+                  
+                  // Add a comment about the status change
+                  await github.rest.issues.createComment({
+                    owner: publicOwner,
+                    repo: publicRepo,
+                    issue_number: publicIssueNumber,
+                    body: `Issue was ${issue.state} by the development team.`
+                  });
+                }
+                
+                // Sync specific labels back if needed (you can customize which labels to sync back)
+                if (context.payload.action === 'labeled' && context.payload.label.name.startsWith('status:')) {
+                  await github.rest.issues.addLabels({
+                    owner: publicOwner,
+                    repo: publicRepo,
+                    issue_number: publicIssueNumber,
+                    labels: [context.payload.label.name]
+                  });
+                }
+              } catch (error) {
+                console.error('Error in syncStatusBackToPublic:', error);
+              }
+            }
+            
+            // Handle syncing comments from private to public
+            async function syncCommentToPublic() {
+              try {
+                if (!context.payload.comment) {
+                  console.log('No comment found in payload');
+                  return;
+                }
+                
+                const issue = context.payload.issue;
+                if (!issue) {
+                  console.log('No issue found in payload');
+                  return;
+                }
+                
+                const publicIssueNumber = extractPublicIssueNumber(issue.title, issue.body);
+                if (!publicIssueNumber) {
+                  console.log('Could not find linked public issue number');
+                  return;
+                }
+                
+                const comment = context.payload.comment;
+                
+                // Only sync comments from team members (not automated comments)
+                // Skip comments that contain the sync marker to avoid infinite loops
+                if (comment.body.includes('**Comment from public issue by @') || 
+                    comment.body.includes('Issue was closed by') ||
+                    comment.body.includes('Issue was reopened by')) {
+                  console.log('Skipping automated comment or sync marker');
+                  return;
+                }
+                
+                // Create a comment in the public repository
+                await github.rest.issues.createComment({
+                  owner: publicOwner,
+                  repo: publicRepo,
+                  issue_number: publicIssueNumber,
+                  body: `**Comment from the development team:**\n\n${comment.body}`
+                });
+                
+                console.log('Successfully synced comment to public issue #', publicIssueNumber);
+              } catch (error) {
+                console.error('Error in syncCommentToPublic:', error);
+              }
+            }
+            
+            // Main function to handle different event types
+            async function main() {
+              if (context.eventName === 'issues') {
+                await syncStatusBackToPublic();
+              } else if (context.eventName === 'issue_comment' && context.payload.action === 'created') {
+                await syncCommentToPublic();
+              }
+            }
+            
+            await main();
