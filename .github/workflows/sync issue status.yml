@@ -10,7 +10,7 @@ jobs:
   sync-issues:
     runs-on: ubuntu-latest
     # Only run this action when the event occurs in the public repository
-    if: github.repository == 'aragonddev/aragond-mud'
+    if: github.repository == 'aragonddev/aragond'
     
     steps:
       - name: Checkout code
@@ -31,7 +31,7 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const privateOwner = 'aragonddev';
-            const privateRepo = 'aragond';
+            const privateRepo = 'aragond-dev';
             
             // Function to extract issue details
             async function getIssueDetails() {

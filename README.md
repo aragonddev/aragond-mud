@@ -1,4 +1,4 @@
-# aragond-mud
+# aragond
 Visit our home page [here](https://aragond.net).
 <br>
 <br>
